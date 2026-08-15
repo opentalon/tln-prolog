@@ -28,9 +28,9 @@ const (
 )
 
 // Diagnostic reports a construct the reader accepted syntactically but the
-// engine will not execute — the honest boundary of this Prolog subset. A future
-// prolog2tln transpiler (separate repo) consumes these to decide what maps to
-// tln and what is dropped.
+// engine does not yet execute — the honest boundary of the Prolog it runs. The
+// porting pipeline reads these to decide, per clause, what lowers to native tln
+// rules and what stays on this engine.
 type Diagnostic struct {
 	Kind    DiagnosticKind
 	Message string

@@ -27,7 +27,7 @@ func ExampleMachine_Solve() {
 // TestSolutionsFeedBackAsFacts is the boundary in action: solve a recursive
 // reachability query, project each answer to a unary EAV fact, and assert them
 // into a tln factstore.MemoryStore — Prolog answers flowing back into the store
-// a host queries. This is what a future prolog2tln / CLI plugin builds on.
+// a host queries. This is the runtime backstop the porting pipeline builds on.
 //
 // Integer node ids are used because the in-process MemoryStore keys entities by
 // integer id; the AtomFacts boundary is store-agnostic, so a document backend
