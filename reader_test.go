@@ -43,10 +43,14 @@ func TestDiagnosticsForUnsupported(t *testing.T) {
 	for _, d := range prog.Diagnostics {
 		kinds[d.Kind]++
 	}
-	for _, want := range []DiagnosticKind{DiagIO, DiagArith, DiagDatabase, DiagCut} {
+	for _, want := range []DiagnosticKind{DiagIO, DiagDatabase, DiagCut} {
 		if kinds[want] == 0 {
 			t.Errorf("expected a %s diagnostic; got %v", want, prog.Diagnostics)
 		}
+	}
+	// Arithmetic is now evaluated, so `is/2` must NOT be diagnosed.
+	if kinds[DiagArith] != 0 {
+		t.Errorf("arithmetic is evaluated now; unexpected arith diagnostic: %v", prog.Diagnostics)
 	}
 	// Despite the unsupported goals, the clause is still read.
 	if len(prog.Clauses) != 1 {

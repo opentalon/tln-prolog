@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+
+	"github.com/opentalon/tln-language/pkg/arith"
 )
 
 // Clause is a program clause Head :- Body. A fact has an empty Body. Bodies are
@@ -143,6 +145,29 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 				return false, nil
 			}
 			return m.solve(ctx, rest, s, depth+1, emit)
+		case g.Functor == "is" && len(g.Args) == 2:
+			v, err := evalArith(g.Args[1], s)
+			if err != nil {
+				return false, err
+			}
+			s2, ok := Unify(g.Args[0], numTerm(v), s)
+			if !ok {
+				return false, nil
+			}
+			return m.solve(ctx, rest, s2, depth+1, emit)
+		case isArithCompare(g.Functor) && len(g.Args) == 2:
+			a, err := evalArith(g.Args[0], s)
+			if err != nil {
+				return false, err
+			}
+			b, err := evalArith(g.Args[1], s)
+			if err != nil {
+				return false, err
+			}
+			if !compareHolds(g.Functor, arith.Compare(a, b)) {
+				return false, nil
+			}
+			return m.solve(ctx, rest, s, depth+1, emit)
 		}
 	}
 
@@ -228,6 +253,91 @@ func queryVars(goals []Term) []string {
 		walkT(g)
 	}
 	return out
+}
+
+// evalArith evaluates an arithmetic expression term to a kernel [arith.Num],
+// reusing the ecosystem's shared numeric kernel so `is/2` matches tln core's
+// arithmetic exactly. Unbound variables and non-evaluable terms are errors —
+// ISO Prolog would throw; the engine surfaces them through the error channel
+// until throw/catch lands (Phase 5a).
+func evalArith(t Term, s Bindings) (arith.Num, error) {
+	t = Resolve(t, s)
+	switch x := t.(type) {
+	case Int:
+		return arith.Int(x.Value), nil
+	case Float:
+		return arith.Float(x.Value), nil
+	case Var:
+		return arith.Num{}, fmt.Errorf("prolog: arithmetic on unbound variable %s", x.Name)
+	case Atom:
+		return arith.Num{}, fmt.Errorf("prolog: %s is not an evaluable constant", x.String())
+	case Compound:
+		switch len(x.Args) {
+		case 1:
+			a, err := evalArith(x.Args[0], s)
+			if err != nil {
+				return arith.Num{}, err
+			}
+			switch x.Functor {
+			case "-":
+				return arith.Neg(a), nil
+			case "+":
+				return a, nil
+			case "abs":
+				return arith.Abs(a), nil
+			}
+		case 2:
+			a, err := evalArith(x.Args[0], s)
+			if err != nil {
+				return arith.Num{}, err
+			}
+			b, err := evalArith(x.Args[1], s)
+			if err != nil {
+				return arith.Num{}, err
+			}
+			return arith.Binary(x.Functor, a, b)
+		}
+		return arith.Num{}, fmt.Errorf("prolog: %s is not an arithmetic function", Indicator(x))
+	}
+	return arith.Num{}, fmt.Errorf("prolog: cannot evaluate %s", t.String())
+}
+
+// numTerm converts a kernel [arith.Num] back to a Prolog term, preserving the
+// int/float distinction.
+func numTerm(n arith.Num) Term {
+	if i, ok := n.Int(); ok {
+		return Int{i}
+	}
+	return Float{n.Float()}
+}
+
+// isArithCompare reports whether functor is an arithmetic comparison operator
+// (=:=, =\=, <, >, >=, =<).
+func isArithCompare(functor string) bool {
+	switch functor {
+	case "=:=", "=\\=", "<", ">", ">=", "=<":
+		return true
+	}
+	return false
+}
+
+// compareHolds interprets a -1/0/1 comparison under an arithmetic comparison op.
+func compareHolds(op string, cmp int) bool {
+	switch op {
+	case "=:=":
+		return cmp == 0
+	case "=\\=":
+		return cmp != 0
+	case "<":
+		return cmp < 0
+	case ">":
+		return cmp > 0
+	case ">=":
+		return cmp >= 0
+	case "=<":
+		return cmp <= 0
+	}
+	return false
 }
 
 // SortAtoms orders a slice of ground atoms/compounds by their canonical string

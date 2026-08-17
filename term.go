@@ -18,6 +18,7 @@ package prolog
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -39,9 +40,12 @@ type Var struct{ Name string }
 // Atom is a symbolic constant — a nullary functor such as foo, [], or '+'.
 type Atom struct{ Name string }
 
-// Int is an integer. This engine models integers only; floats are read as atoms
-// and reported by a diagnostic.
+// Int is an integer.
 type Int struct{ Value int64 }
+
+// Float is a floating-point number. Arithmetic (see the shared arith kernel)
+// preserves the int/float distinction, so 7 and 7.0 are distinct terms.
+type Float struct{ Value float64 }
 
 // Compound is a structure functor(Args...) with arity len(Args) >= 1.
 type Compound struct {
@@ -52,6 +56,7 @@ type Compound struct {
 func (Var) isTerm()      {}
 func (Atom) isTerm()     {}
 func (Int) isTerm()      {}
+func (Float) isTerm()    {}
 func (Compound) isTerm() {}
 
 func (v Var) String() string { return v.Name }
@@ -61,7 +66,8 @@ func (a Atom) String() string {
 	}
 	return a.Name
 }
-func (i Int) String() string { return fmt.Sprintf("%d", i.Value) }
+func (i Int) String() string   { return fmt.Sprintf("%d", i.Value) }
+func (f Float) String() string { return strconv.FormatFloat(f.Value, 'g', -1, 64) }
 
 func (c Compound) String() string {
 	if c.Functor == "." && len(c.Args) == 2 {
