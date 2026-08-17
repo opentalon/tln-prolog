@@ -75,10 +75,9 @@ func TestArithmeticErrorsAreCatchable(t *testing.T) {
 	if got := first(t, "", "catch(X is Y + 1, error(E, _), true)", "E"); got != "instantiation_error" {
 		t.Errorf("instantiation => %q, want instantiation_error", got)
 	}
-	// A non-evaluable atom throws type_error(evaluable, foo/0). (The indicator
-	// prints in functional form since operators are not written infix.)
-	if got := first(t, "", "catch(X is foo, error(type_error(evaluable, I), _), true)", "I"); got != "/(foo,0)" {
-		t.Errorf("type_error culprit => %q, want /(foo,0)", got)
+	// A non-evaluable atom throws type_error(evaluable, foo/0).
+	if got := first(t, "", "catch(X is foo, error(type_error(evaluable, I), _), true)", "I"); got != "foo/0" {
+		t.Errorf("type_error culprit => %q, want foo/0", got)
 	}
 }
 

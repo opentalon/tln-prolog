@@ -69,15 +69,80 @@ func (a Atom) String() string {
 func (i Int) String() string   { return fmt.Sprintf("%d", i.Value) }
 func (f Float) String() string { return strconv.FormatFloat(f.Value, 'g', -1, 64) }
 
-func (c Compound) String() string {
+func (c Compound) String() string { return writeTerm(c, 1200) }
+
+// writeTerm renders a term in canonical, read-back-correct notation: known infix
+// operators as `a+b` / `foo/3`, prefix operators as `\+g`, lists as [a,b|T], and
+// everything else in functional `f(a,b)` form. maxPrec is the highest operator
+// precedence allowed without parentheses in the current position.
+func writeTerm(t Term, maxPrec int) string {
+	c, ok := t.(Compound)
+	if !ok {
+		return t.String()
+	}
 	if c.Functor == "." && len(c.Args) == 2 {
 		return listString(c)
 	}
+	if len(c.Args) == 2 {
+		if info, ok := infixOps[c.Functor]; ok {
+			lp, rp := info.prec, info.prec
+			if info.right {
+				lp-- // xfy: left binds tighter
+			} else {
+				rp-- // yfx: right binds tighter
+			}
+			s := writeTerm(c.Args[0], lp) + opText(c.Functor) + writeTerm(c.Args[1], rp)
+			if info.prec > maxPrec {
+				return "(" + s + ")"
+			}
+			return s
+		}
+	}
+	if len(c.Args) == 1 {
+		if prec, ok := prefixOps[c.Functor]; ok {
+			s := c.Functor + prefixSpace(c.Functor) + writeTerm(c.Args[0], prec)
+			if prec > maxPrec {
+				return "(" + s + ")"
+			}
+			return s
+		}
+	}
 	parts := make([]string, len(c.Args))
 	for i, a := range c.Args {
-		parts[i] = a.String()
+		parts[i] = writeTerm(a, 999) // argument context: below the comma operator
 	}
 	return fmt.Sprintf("%s(%s)", Atom{c.Functor}.String(), strings.Join(parts, ","))
+}
+
+// opText renders an infix operator with surrounding layout: `,` tight, alphabetic
+// operators (is, mod) spaced, symbolic operators (+, /, =) tight.
+func opText(op string) string {
+	if op == "," {
+		return ","
+	}
+	if isAlphaOp(op) {
+		return " " + op + " "
+	}
+	return op
+}
+
+// prefixSpace separates a prefix operator from its operand: a space after an
+// alphabetic operator (dynamic), none after a symbolic one (\+).
+func prefixSpace(op string) string {
+	if isAlphaOp(op) {
+		return " "
+	}
+	return ""
+}
+
+func isAlphaOp(op string) bool {
+	for i := 0; i < len(op); i++ {
+		c := op[i]
+		if !(c >= 'a' && c <= 'z') {
+			return false
+		}
+	}
+	return len(op) > 0
 }
 
 // Indicator returns the term's predicate indicator name/arity — "foo/2",

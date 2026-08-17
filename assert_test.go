@@ -105,7 +105,7 @@ func TestAssertOnStaticThrows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("solve: %v", err)
 	}
-	if len(sols) != 1 || sols[0]["E"].String() != "permission_error(modify,static_procedure,/(fact,1))" {
+	if len(sols) != 1 || sols[0]["E"].String() != "permission_error(modify,static_procedure,fact/1)" {
 		t.Errorf("static assert => %v, want permission_error", sols)
 	}
 }
