@@ -1,2 +1,4 @@
 github.com/opentalon/tln-language v0.13.1-0.20260817085154-8c7bcb3f5e23 h1:Bk6bDbllpCOc0qpMdavhgiV9pagb92Avt+zKPlJ/xlI=
 github.com/opentalon/tln-language v0.13.1-0.20260817085154-8c7bcb3f5e23/go.mod h1:ruX/oBoD9a7iBgzQy9xjA0p7tkt21SyWKxNu5W5Wxdk=
+github.com/opentalon/tln-language v0.13.1 h1:DhaaRqE+N9QToYO6ZV5/+88ruFCSYecGZ6TmdPXJ0nc=
+github.com/opentalon/tln-language v0.13.1/go.mod h1:ruX/oBoD9a7iBgzQy9xjA0p7tkt21SyWKxNu5W5Wxdk=

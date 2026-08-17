@@ -143,6 +143,10 @@ func needsQuote(name string) bool {
 	if name == "[]" || name == "!" || name == ";" {
 		return false
 	}
+	// Symbolic atoms (e.g. <, =, @<, \==, ->) read back unquoted.
+	if isSymbolicAtom(name) {
+		return false
+	}
 	if name[0] < 'a' || name[0] > 'z' {
 		return true
 	}
@@ -153,4 +157,19 @@ func needsQuote(name string) bool {
 		}
 	}
 	return false
+}
+
+// isSymbolicAtom reports whether name is a non-empty run of ISO symbol
+// characters — such atoms (operators like <, =, @<, ->) print without quotes.
+func isSymbolicAtom(name string) bool {
+	const symbolChars = "+-*/\\^<>=~:.?@#&$"
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if strings.IndexByte(symbolChars, name[i]) < 0 {
+			return false
+		}
+	}
+	return true
 }
