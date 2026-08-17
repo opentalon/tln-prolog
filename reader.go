@@ -49,6 +49,9 @@ type Program struct {
 	// Dynamic holds the predicate indicators ("name/arity") declared via
 	// `:- dynamic ...` directives; only these may be asserted/retracted.
 	Dynamic []string
+	// Tabled holds the predicate indicators declared via `:- table ...`; these
+	// are evaluated under well-founded semantics (tabling.go).
+	Tabled []string
 }
 
 // Parse reads Prolog source into a [Program]. It never returns an error: syntax
@@ -68,7 +71,8 @@ func Parse(src string) *Program {
 			break
 		}
 		if directive != nil {
-			prog.Dynamic = append(prog.Dynamic, dynamicIndicators(directive)...)
+			prog.Dynamic = append(prog.Dynamic, directiveIndicators(directive, "dynamic")...)
+			prog.Tabled = append(prog.Tabled, directiveIndicators(directive, "table")...)
 			continue
 		}
 		if clause != nil {
@@ -248,6 +252,7 @@ var prefixOps = map[string]int{
 	":-":      1200,
 	"?-":      1200,
 	"dynamic": 1150,
+	"table":   1150,
 }
 
 // startsTerm reports whether tok can begin a term (used to decide if a bare
@@ -324,11 +329,11 @@ func (p *parser) clause() (*Clause, Term, bool, []Diagnostic) {
 	return &Clause{Head: head, Body: body}, nil, true, diags
 }
 
-// dynamicIndicators extracts the "name/arity" strings from a `dynamic ...`
-// directive body: `dynamic(foo/2)`, `dynamic foo/2`, or a comma list thereof.
-func dynamicIndicators(directive Term) []string {
+// directiveIndicators extracts the "name/arity" strings from a directive of the
+// given functor (dynamic/table): `f(foo/2)`, `f foo/2`, or a comma list.
+func directiveIndicators(directive Term, functor string) []string {
 	c, ok := directive.(Compound)
-	if !ok || c.Functor != "dynamic" || len(c.Args) != 1 {
+	if !ok || c.Functor != functor || len(c.Args) != 1 {
 		return nil
 	}
 	var out []string

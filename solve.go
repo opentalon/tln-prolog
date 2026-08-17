@@ -77,13 +77,33 @@ type Machine struct {
 	renameCt int
 
 	dynamic map[string]bool // predicates assert/retract may modify
+	tabled  map[string]bool // predicates evaluated under well-founded semantics
 
 	// Per-run mutable state. runClauses is a copy-on-write view of clauses used
 	// only during a Solve; assert/retract mutate it and it is discarded when the
 	// run ends, so mutations are run-scoped (never touch the base program).
 	runClauses []Clause
 	mutations  []Mutation
+	lastModel  *wfsModel // well-founded model from the most recent Solve
+
+	// Tabling / well-founded state (tabling.go). tabMode selects how tabled
+	// goals resolve: off, grounding (building the model), or query (consulting
+	// the finished model).
+	tabMode       tabMode
+	posOracle     map[string]Term // positive tabled answers to enumerate
+	negJ          map[string]bool // grounding: \+a holds iff key(a) ∉ negJ
+	negFalse      map[string]bool // query: \+a holds iff key(a) ∈ negFalse
+	tabledClauses []Clause        // clauses whose head is a tabled predicate
+	wfsUniverse   map[string]Term // ground atoms seen while building the model
 }
+
+type tabMode int
+
+const (
+	tabOff tabMode = iota
+	tabGrounding
+	tabQuery
+)
 
 // Mutation records one assert/retract for the audit trail.
 type Mutation struct {
@@ -112,10 +132,24 @@ func WithDynamic(indicators ...string) Option {
 	}
 }
 
+// WithTabled marks predicate indicators ("name/arity") as tabled, so they are
+// evaluated under well-founded semantics (see tabling.go).
+func WithTabled(indicators ...string) Option {
+	return func(m *Machine) {
+		if m.tabled == nil {
+			m.tabled = map[string]bool{}
+		}
+		for _, pi := range indicators {
+			m.tabled[pi] = true
+		}
+	}
+}
+
 // NewMachineFromProgram builds a machine from a parsed program, carrying its
-// `:- dynamic` declarations through so assert/retract are permitted on them.
+// `:- dynamic` and `:- table` declarations through.
 func NewMachineFromProgram(p *Program, opts ...Option) *Machine {
-	return NewMachine(p.Clauses, append([]Option{WithDynamic(p.Dynamic...)}, opts...)...)
+	front := []Option{WithDynamic(p.Dynamic...), WithTabled(p.Tabled...)}
+	return NewMachine(p.Clauses, append(front, opts...)...)
 }
 
 // NewMachine builds a resolver over clauses, with the bootstrap prelude
@@ -168,7 +202,23 @@ func (m *Machine) Solve(ctx context.Context, goals []Term, maxSolutions int) ([]
 	// run ends, so clause-database changes never outlive the query.
 	m.runClauses = append([]Clause{}, m.clauses...)
 	m.mutations = nil
-	defer func() { m.runClauses = nil }()
+	defer func() {
+		m.runClauses = nil
+		m.tabMode, m.posOracle, m.negFalse = tabOff, nil, nil
+	}()
+
+	// Tabled predicates: compute the well-founded model once, then answer the
+	// query against it (true atoms succeed; \+ succeeds only on false atoms).
+	if len(m.tabled) > 0 {
+		model, err := m.computeWFS(ctx)
+		if err != nil {
+			return nil, err
+		}
+		m.lastModel = model
+		m.tabMode = tabQuery
+		m.posOracle = model.trueAtoms
+		m.negFalse = model.falseKeys
+	}
 
 	_, _, err := m.solve(ctx, goals, Bindings{}, 0, func(s Bindings) bool {
 		sol := make(Solution, len(qvars))
@@ -242,6 +292,16 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 		case g.Functor == "->" && len(g.Args) == 2:
 			return m.solveITE(ctx, g.Args[0], g.Args[1], nil, rest, s, depth, emit)
 		case (g.Functor == "\\+" || g.Functor == "not") && len(g.Args) == 1:
+			// Negation of a tabled atom consults the well-founded model: \+a
+			// holds only when a is *false* (not merely unproven; undefined ≠ true).
+			if m.tabMode != tabOff {
+				if a := Resolve(g.Args[0], s); m.isTabledGoal(a) && isGround(a) {
+					if m.negHolds(a) {
+						return m.solve(ctx, rest, s, depth+1, emit)
+					}
+					return false, nil, nil
+				}
+			}
 			ok, err := m.succeeds(ctx, g.Args[0], s, depth)
 			if err != nil {
 				return false, nil, err
@@ -361,6 +421,12 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 			}
 			return m.solve(ctx, rest, s, depth+1, emit)
 		}
+	}
+
+	// Tabled predicates resolve from the well-founded model (true answers),
+	// never by SLD recursion — this is what makes left recursion terminate.
+	if m.tabMode != tabOff && m.isTabledGoal(goal) {
+		return m.answerTabled(ctx, goal, rest, s, depth, emit)
 	}
 
 	// User clauses: try each, renamed fresh so its variables never clash. A
