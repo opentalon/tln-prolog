@@ -361,6 +361,14 @@ func (p *parser) primary() (Term, []Diagnostic, error) {
 				return Float{-f}, nil, nil
 			}
 		}
+		// prefix negation-as-failure: \+ Goal (fy, precedence 900).
+		if tok.text == "\\+" {
+			arg, d, err := p.term(900)
+			if err != nil {
+				return nil, d, err
+			}
+			return Compound{Functor: "\\+", Args: []Term{arg}}, d, nil
+		}
 		return nil, nil, fmt.Errorf("unexpected operator %q", tok.text)
 	case tAtom:
 		// compound?  atom '(' args ')'
@@ -488,9 +496,6 @@ func scanDiagnostics(body []Term, line int) []Diagnostic {
 	visit = func(t Term) {
 		switch x := t.(type) {
 		case Atom:
-			if x.Name == "!" {
-				out = append(out, Diagnostic{DiagCut, "cut (!) is not implemented; ignored during resolution", line})
-			}
 			if x.Name == "nl" {
 				out = append(out, Diagnostic{DiagIO, "nl/0 has no effect in this engine", line})
 			}

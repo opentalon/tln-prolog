@@ -81,7 +81,7 @@ func (m *Machine) Solve(ctx context.Context, goals []Term, maxSolutions int) ([]
 	var out []Solution
 	m.renameCt = 0
 
-	stop, err := m.solve(ctx, goals, Bindings{}, 0, func(s Bindings) bool {
+	_, _, err := m.solve(ctx, goals, Bindings{}, 0, func(s Bindings) bool {
 		sol := make(Solution, len(qvars))
 		for _, v := range qvars {
 			sol[v] = Resolve(Var{v}, s)
@@ -92,7 +92,6 @@ func (m *Machine) Solve(ctx context.Context, goals []Term, maxSolutions int) ([]
 	if err != nil {
 		return out, err
 	}
-	_ = stop
 	return out, nil
 }
 
@@ -103,91 +102,221 @@ func (m *Machine) Prove(ctx context.Context, goals []Term) (bool, error) {
 }
 
 // solve is the recursive SLD engine. emit is called with each complete
-// substitution and returns true to stop the search early. The bool result
-// propagates that stop signal up the stack.
-func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int, emit func(Bindings) bool) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
+// substitution and returns true to stop the search early.
+//
+// It returns three signals. stop propagates an early stop from emit (the
+// solution cap) — unwind everything. commit carries a cut: when a '!' commits,
+// it returns the barrier pointer of the clause activation it belongs to, and
+// each clause loop it unwinds through breaks without trying alternatives until
+// the loop that owns that barrier consumes it. err is a hard failure.
+func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int, emit func(Bindings) bool) (stop bool, commit *bool, err error) {
+	if e := ctx.Err(); e != nil {
+		return false, nil, e
 	}
 	if len(goals) == 0 {
-		return emit(s), nil
+		return emit(s), nil, nil
 	}
 	if depth > m.maxDepth {
-		return false, ErrDepthExceeded
+		return false, nil, ErrDepthExceeded
 	}
 
 	goal := walk(goals[0], s)
 	rest := goals[1:]
 
-	// Built-in control and unification. Everything Prolog-ish that this engine
-	// does NOT execute (cut, IO, assert/retract, arithmetic) is deliberately
-	// absent here and flagged by the reader's diagnostics instead.
 	switch g := goal.(type) {
+	case cutMarker:
+		// Cut succeeds and lets the continuation run; once that continuation is
+		// exhausted, commit to this cut's barrier so the owning clause loop
+		// stops offering alternatives (and nested loops in between unwind).
+		stop, commit, err := m.solve(ctx, rest, s, depth+1, emit)
+		if err != nil || stop || commit != nil {
+			return stop, commit, err
+		}
+		return false, g.barrier, nil
 	case Atom:
 		switch g.Name {
 		case "true":
 			return m.solve(ctx, rest, s, depth+1, emit)
 		case "fail", "false":
-			return false, nil
+			return false, nil, nil
+		case "!":
+			// An unbound cut (typed at the top level, no clause choice point to
+			// prune) behaves as true.
+			return m.solve(ctx, rest, s, depth+1, emit)
 		}
 	case Compound:
 		switch {
 		case g.Functor == "," && len(g.Args) == 2:
 			return m.solve(ctx, append([]Term{g.Args[0], g.Args[1]}, rest...), s, depth+1, emit)
+		case g.Functor == ";" && len(g.Args) == 2:
+			return m.solveOr(ctx, g.Args[0], g.Args[1], rest, s, depth, emit)
+		case g.Functor == "->" && len(g.Args) == 2:
+			return m.solveITE(ctx, g.Args[0], g.Args[1], nil, rest, s, depth, emit)
+		case (g.Functor == "\\+" || g.Functor == "not") && len(g.Args) == 1:
+			ok, err := m.succeeds(ctx, g.Args[0], s, depth)
+			if err != nil {
+				return false, nil, err
+			}
+			if ok {
+				return false, nil, nil
+			}
+			return m.solve(ctx, rest, s, depth+1, emit)
+		case g.Functor == "once" && len(g.Args) == 1:
+			b, ok, err := m.firstSol(ctx, g.Args[0], s, depth)
+			if err != nil {
+				return false, nil, err
+			}
+			if !ok {
+				return false, nil, nil
+			}
+			return m.solve(ctx, rest, b, depth+1, emit)
 		case g.Functor == "=" && len(g.Args) == 2:
 			s2, ok := Unify(g.Args[0], g.Args[1], s)
 			if !ok {
-				return false, nil
+				return false, nil, nil
 			}
 			return m.solve(ctx, rest, s2, depth+1, emit)
 		case g.Functor == "\\=" && len(g.Args) == 2:
 			if _, ok := Unify(g.Args[0], g.Args[1], s); ok {
-				return false, nil
+				return false, nil, nil
 			}
 			return m.solve(ctx, rest, s, depth+1, emit)
 		case g.Functor == "is" && len(g.Args) == 2:
 			v, err := evalArith(g.Args[1], s)
 			if err != nil {
-				return false, err
+				return false, nil, err
 			}
 			s2, ok := Unify(g.Args[0], numTerm(v), s)
 			if !ok {
-				return false, nil
+				return false, nil, nil
 			}
 			return m.solve(ctx, rest, s2, depth+1, emit)
 		case isArithCompare(g.Functor) && len(g.Args) == 2:
 			a, err := evalArith(g.Args[0], s)
 			if err != nil {
-				return false, err
+				return false, nil, err
 			}
 			b, err := evalArith(g.Args[1], s)
 			if err != nil {
-				return false, err
+				return false, nil, err
 			}
 			if !compareHolds(g.Functor, arith.Compare(a, b)) {
-				return false, nil
+				return false, nil, nil
 			}
 			return m.solve(ctx, rest, s, depth+1, emit)
 		}
 	}
 
-	// User clauses: try each, renamed fresh so its variables never clash.
+	// User clauses: try each, renamed fresh so its variables never clash. A
+	// fresh barrier scopes any '!' in the selected clause body to this call.
+	barrier := new(bool)
 	for _, c := range m.clauses {
 		rc := m.rename(c)
 		s2, ok := Unify(goal, rc.Head, s)
 		if !ok {
 			continue
 		}
-		next := append(append([]Term{}, rc.Body...), rest...)
-		stop, err := m.solve(ctx, next, s2, depth+1, emit)
+		body := bindCutGoals(rc.Body, barrier)
+		next := append(append([]Term{}, body...), rest...)
+		stop, commit, err := m.solve(ctx, next, s2, depth+1, emit)
 		if err != nil {
-			return false, err
+			return false, nil, err
 		}
 		if stop {
-			return true, nil
+			return true, nil, nil
+		}
+		if commit != nil {
+			if commit == barrier {
+				return false, nil, nil // cut committed to this predicate: stop
+			}
+			return false, commit, nil // a cut for an outer barrier: propagate
 		}
 	}
-	return false, nil
+	return false, nil, nil
+}
+
+// solveOr handles disjunction (A ; B), including the (Cond -> Then ; Else)
+// if-then-else idiom.
+func (m *Machine) solveOr(ctx context.Context, left, right Term, rest []Term, s Bindings, depth int, emit func(Bindings) bool) (bool, *bool, error) {
+	if ite, ok := left.(Compound); ok && ite.Functor == "->" && len(ite.Args) == 2 {
+		return m.solveITE(ctx, ite.Args[0], ite.Args[1], right, rest, s, depth, emit)
+	}
+	stop, commit, err := m.solve(ctx, append([]Term{left}, rest...), s, depth+1, emit)
+	if err != nil || stop || commit != nil {
+		return stop, commit, err
+	}
+	return m.solve(ctx, append([]Term{right}, rest...), s, depth+1, emit)
+}
+
+// solveITE handles (Cond -> Then) and (Cond -> Then ; Else). Cond is committed
+// to its first solution (a local cut); elseGoal is nil for a bare if-then.
+func (m *Machine) solveITE(ctx context.Context, cond, then, elseGoal Term, rest []Term, s Bindings, depth int, emit func(Bindings) bool) (bool, *bool, error) {
+	b, ok, err := m.firstSol(ctx, cond, s, depth)
+	if err != nil {
+		return false, nil, err
+	}
+	if ok {
+		return m.solve(ctx, append([]Term{then}, rest...), b, depth+1, emit)
+	}
+	if elseGoal == nil {
+		return false, nil, nil
+	}
+	return m.solve(ctx, append([]Term{elseGoal}, rest...), s, depth+1, emit)
+}
+
+// succeeds reports whether goal has at least one solution under s.
+func (m *Machine) succeeds(ctx context.Context, goal Term, s Bindings, depth int) (bool, error) {
+	_, ok, err := m.firstSol(ctx, goal, s, depth)
+	return ok, err
+}
+
+// firstSol solves goal to its first solution, returning the extended bindings.
+// It is the cut-opaque boundary used by \+, once, and the condition of ->.
+func (m *Machine) firstSol(ctx context.Context, goal Term, s Bindings, depth int) (Bindings, bool, error) {
+	var found Bindings
+	ok := false
+	_, _, err := m.solve(ctx, []Term{goal}, s, depth+1, func(b Bindings) bool {
+		found = b
+		ok = true
+		return true // stop at the first solution
+	})
+	return found, ok, err
+}
+
+// cutMarker is the internal goal that '!' becomes once bound to the cut barrier
+// of the clause activation it appears in.
+type cutMarker struct{ barrier *bool }
+
+func (cutMarker) isTerm()        {}
+func (cutMarker) String() string { return "!" }
+
+// bindCutGoals binds every '!' in a clause body to barrier.
+func bindCutGoals(body []Term, barrier *bool) []Term {
+	out := make([]Term, len(body))
+	for i, g := range body {
+		out[i] = bindCut(g, barrier)
+	}
+	return out
+}
+
+// bindCut replaces '!' with a cutMarker bound to barrier, recursing through the
+// control constructs (,/;/->) that are transparent to cut so a cut inside a
+// branch still cuts the enclosing clause. It does not descend into ordinary
+// predicate arguments.
+func bindCut(g Term, barrier *bool) Term {
+	if a, ok := g.(Atom); ok && a.Name == "!" {
+		return cutMarker{barrier}
+	}
+	if c, ok := g.(Compound); ok && len(c.Args) == 2 {
+		switch c.Functor {
+		case ",", ";", "->":
+			return Compound{Functor: c.Functor, Args: []Term{
+				bindCut(c.Args[0], barrier),
+				bindCut(c.Args[1], barrier),
+			}}
+		}
+	}
+	return g
 }
 
 // rename returns a copy of c with every variable given a fresh, activation-unique
