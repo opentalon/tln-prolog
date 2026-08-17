@@ -121,13 +121,25 @@ yields `[]` on no solutions; `bagof`/`setof` fail; `setof` sorts + dedups.
 
 </details>
 
-### Phase 4 — Term / list / atom builtins + bootstrap prelude
+### Phase 4 — Term / list / atom builtins + bootstrap prelude  *(shipped)*
+
+**Status: done.** `builtins.go` adds `functor/3`, `arg/3`, `=../2`, `atom_length/2`,
+`atom_codes/2`, `atom_chars/2`, `char_code/2`, `number_codes/2`, the type-test
+family (`var nonvar atom atomic number integer float compound callable is_list
+ground`), and Go-side `sort/2`/`msort/2` (reusing `compareTerms`). `prelude.go`
+loads a bootstrap library (`append member memberchk reverse last length nth0 nth1
+select between`) once; `NewMachine` prepends it, and a user definition of a
+prelude predicate shadows it. Reader gained the `=..` operator.
+
+<details><summary>Original design note (kept for context)</summary>
 
 - Go builtins: `functor/3`, `arg/3`, `=../2` (univ), `atom_codes/2`,
   `atom_chars/2`, `atom_length/2`, `char_code/2`, `number_codes/2`, type tests
   (`var/1 nonvar/1 atom/1 number/1 integer/1 compound/1 is_list/1`).
 - Prelude `.pl` loaded into every machine: `append/3 member/2 length/2 reverse/2
   last/2 nth0/3 nth1/3 msort/2 sort/2 select/3 between/3`.
+
+</details>
 
 ### Phase 5a — `throw/1` + `catch/3`
 
