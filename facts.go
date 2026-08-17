@@ -92,9 +92,9 @@ func atomKey(name string, args []any) string {
 // its variables replaced — the bridge from "?- p(X)" plus a binding {X=a} to the
 // ground atom p(a) that [AtomFacts] projects.
 func Instantiate(goal Term, sol Solution) Term {
-	b := make(Bindings, len(sol))
+	b := NewBindings()
 	for k, v := range sol {
-		b[k] = v
+		b.st.bind(k, v)
 	}
 	return Resolve(goal, b)
 }
