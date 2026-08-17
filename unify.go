@@ -80,6 +80,9 @@ func Unify(a, b Term, s Bindings) (Bindings, bool) {
 	case Int:
 		bt, ok := b.(Int)
 		return s, ok && at.Value == bt.Value
+	case Float:
+		bt, ok := b.(Float)
+		return s, ok && at.Value == bt.Value
 	case Compound:
 		bt, ok := b.(Compound)
 		if !ok || at.Functor != bt.Functor || len(at.Args) != len(bt.Args) {

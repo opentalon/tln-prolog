@@ -342,17 +342,23 @@ func (p *parser) primary() (Term, []Diagnostic, error) {
 		n, _ := strconv.ParseInt(tok.text, 10, 64)
 		return Int{n}, nil, nil
 	case tFloat:
-		return Atom{tok.text}, []Diagnostic{{DiagUnsupported, "float literal " + tok.text + " read as atom (engine is integer-only)", tok.line}}, nil
+		f, _ := strconv.ParseFloat(tok.text, 64)
+		return Float{f}, nil, nil
 	case tVar:
 		return Var{tok.text}, nil, nil
 	case tOp:
-		// prefix minus on a number: -3
+		// prefix minus on a number: -3, -3.5
 		if tok.text == "-" {
 			nt := p.peekTok()
 			if nt.kind == tInt {
 				p.advance()
 				n, _ := strconv.ParseInt(nt.text, 10, 64)
 				return Int{-n}, nil, nil
+			}
+			if nt.kind == tFloat {
+				p.advance()
+				f, _ := strconv.ParseFloat(nt.text, 64)
+				return Float{-f}, nil, nil
 			}
 		}
 		return nil, nil, fmt.Errorf("unexpected operator %q", tok.text)
@@ -494,8 +500,6 @@ func scanDiagnostics(body []Term, line int) []Diagnostic {
 				out = append(out, Diagnostic{DiagIO, Indicator(x) + " (IO) is not executed", line})
 			case "assert/1", "asserta/1", "assertz/1", "retract/1", "retractall/1", "abolish/1":
 				out = append(out, Diagnostic{DiagDatabase, Indicator(x) + " (database mutation) is not executed", line})
-			case "is/2", "</2", ">/2", "=</2", ">=/2", "=:=/2", "=\\=/2":
-				out = append(out, Diagnostic{DiagArith, Indicator(x) + " (arithmetic) is not evaluated", line})
 			case "findall/3", "bagof/3", "setof/3", "forall/2", "aggregate_all/3":
 				out = append(out, Diagnostic{DiagUnsupported, Indicator(x) + " is not supported", line})
 			}
