@@ -230,6 +230,7 @@ var infixOps = map[string]opInfo{
 	"@<": {700, false}, "@>": {700, false}, "@=<": {700, false}, "@>=": {700, false},
 	"+": {500, false}, "-": {500, false},
 	"*": {400, false}, "/": {400, false}, "//": {400, false}, "mod": {400, false},
+	"^": {200, true},
 }
 
 type parser struct {
@@ -505,7 +506,7 @@ func scanDiagnostics(body []Term, line int) []Diagnostic {
 				out = append(out, Diagnostic{DiagIO, Indicator(x) + " (IO) is not executed", line})
 			case "assert/1", "asserta/1", "assertz/1", "retract/1", "retractall/1", "abolish/1":
 				out = append(out, Diagnostic{DiagDatabase, Indicator(x) + " (database mutation) is not executed", line})
-			case "findall/3", "bagof/3", "setof/3", "forall/2", "aggregate_all/3":
+			case "forall/2", "aggregate_all/3":
 				out = append(out, Diagnostic{DiagUnsupported, Indicator(x) + " is not supported", line})
 			}
 			for _, a := range x.Args {

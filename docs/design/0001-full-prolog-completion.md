@@ -99,7 +99,16 @@ Once cut exists, derive the rest as library/sugar: `(->)/2`, `(;)/2`, `\+/1`,
 
 </details>
 
-### Phase 3 — `findall/3` → `bagof/3` / `setof/3`
+### Phase 3 — `findall/3` → `bagof/3` / `setof/3`  *(shipped)*
+
+**Status: done.** `meta.go` adds `copy_term/2`, the standard order of terms
+(`compareTerms`, delegating numeric ties to `pkg/arith.Compare`), the comparison
+operators `== \== @< @> @=< @>=` and `compare/3`, and `findall/3`, `bagof/3`,
+`setof/3` with `^/2` existential quantification and free-variable grouping. The
+reader gained the `^` operator; symbolic atoms now print unquoted. `findall`
+yields `[]` on no solutions; `bagof`/`setof` fail; `setof` sorts + dedups.
+
+<details><summary>Original design note (kept for context)</summary>
 
 - `copy_term/2` first (term copy with fresh vars — reuse `rename` machinery).
 - `findall(Tmpl, Goal, L)`: solve `Goal` to exhaustion, collect
@@ -109,6 +118,8 @@ Once cut exists, derive the rest as library/sugar: `(->)/2`, `(;)/2`, `\+/1`,
   dedup/sort.
 - `bagof`/`setof`: free-variable handling and `^/2` witness grouping.
 - Drop the `findall`/`bagof`/`setof` `DiagUnsupported`.
+
+</details>
 
 ### Phase 4 — Term / list / atom builtins + bootstrap prelude
 

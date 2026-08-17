@@ -204,6 +204,30 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 				return false, nil, nil
 			}
 			return m.solve(ctx, rest, s, depth+1, emit)
+		case isTermCompare(g.Functor) && len(g.Args) == 2:
+			if !termCompareHolds(g.Functor, compareTerms(Resolve(g.Args[0], s), Resolve(g.Args[1], s))) {
+				return false, nil, nil
+			}
+			return m.solve(ctx, rest, s, depth+1, emit)
+		case g.Functor == "compare" && len(g.Args) == 3:
+			ord := []string{"<", "=", ">"}[compareTerms(Resolve(g.Args[1], s), Resolve(g.Args[2], s))+1]
+			s2, ok := Unify(g.Args[0], Atom{ord}, s)
+			if !ok {
+				return false, nil, nil
+			}
+			return m.solve(ctx, rest, s2, depth+1, emit)
+		case g.Functor == "copy_term" && len(g.Args) == 2:
+			s2, ok := Unify(g.Args[1], m.copyOut(g.Args[0], s), s)
+			if !ok {
+				return false, nil, nil
+			}
+			return m.solve(ctx, rest, s2, depth+1, emit)
+		case g.Functor == "findall" && len(g.Args) == 3:
+			return m.solveFindall(ctx, g.Args[0], g.Args[1], g.Args[2], rest, s, depth, emit)
+		case g.Functor == "bagof" && len(g.Args) == 3:
+			return m.solveBagof(ctx, g.Args[0], g.Args[1], g.Args[2], rest, s, depth, emit, false)
+		case g.Functor == "setof" && len(g.Args) == 3:
+			return m.solveBagof(ctx, g.Args[0], g.Args[1], g.Args[2], rest, s, depth, emit, true)
 		}
 	}
 
