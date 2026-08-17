@@ -24,13 +24,17 @@ in pure Go, that lives inside the tln family. Ported clauses that cannot become
 tln core rules run here instead — same ecosystem, still no external Prolog. It
 carries the parts of the language core lacks:
 
-- **Structured terms** — `Var · Atom · Int · Compound`, lists as `"."/2` cells.
-- **Unification** — most-general unifier with a sound, always-on occurs-check.
+- **Structured terms** — `Var · Atom · Int · Float · Compound`, lists as `"."/2` cells.
+- **Unification** — most-general unifier with a sound, always-on occurs-check,
+  over a trail-based substitution (O(1) bind, O(1) lookup, backtrack by undo).
 - **Resolution** — a pure-Go SLD `Machine`: depth-first search, backtracking,
-  fresh clause renaming, and a depth bound that turns left recursion into an
-  explicit `ErrDepthExceeded` instead of a hang.
+  fresh clause renaming, cut, and a depth bound that turns runaway recursion into
+  an explicit `ErrDepthExceeded` instead of a hang.
+- **Well-founded negation** — tabled predicates (`:- table`) are evaluated to the
+  three-valued well-founded model, so left recursion terminates and `\+` means
+  the same thing it does in tln core.
 - **A `.pl` reader** — an ISO-subset parser that **never drops anything
-  silently**: constructs it does not yet run come back as typed `Diagnostic`s.
+  silently**: constructs it does not run come back as typed `Diagnostic`s.
 - **A store boundary** — answers project to `[]factstore.Fact` so results flow
   into any tln FactStore (`MemoryStore`, `tln-db`, …).
 
@@ -50,31 +54,79 @@ file, are **separate repos**. This repo is deliberately just the two things the
 port depends on: the **parser** (`.pl` → term IR) and the **engine** (the runtime
 for everything that stays Prolog).
 
-## What it runs today, and what it only diagnoses
+## What it runs
 
-The engine runs **Horn-clause logic** plus the control built-ins `true`, `fail`,
-`=/2`, and `\=/2` — enough for recursion, lists, and backtracking:
+The engine runs a substantial ISO subset — enough to port real programs, not
+just Horn clauses.
+
+**Control & logic** — clauses, conjunction, backtracking, `true`/`fail`,
+unification (`=`, `\=`), term comparison (`==`, `\==`, `@<`, `@>`, `@=<`, `@>=`,
+`compare/3`), cut (`!`), if-then-else (`-> ;`), disjunction (`;`), negation
+(`\+`, `not/1`), `once/1`:
 
 ```prolog
 member(X, [X|_]).
 member(X, [_|T]) :- member(X, T).
 
-ancestor(X, Y) :- parent(X, Y).
-ancestor(X, Y) :- parent(X, Z), ancestor(Z, Y).
+max(A, B, A) :- A >= B, !.
+max(_, B, B).
 ```
 
-Everything else Prolog-ish is recognised by the reader and **reported, not yet
-executed** — this is the honest boundary, and the checklist of what the engine
-must gain to run *any* program:
+**Arithmetic** — `is/2` and the comparison operators over an integer/float tower,
+shared with tln core via the [`pkg/arith`](https://github.com/opentalon/tln-language/tree/master/pkg/arith)
+kernel, so `X is 2 + 3 * 4` means exactly what it means in a tln rule:
 
-| Diagnostic kind | Examples                                    |
-|-----------------|---------------------------------------------|
-| `cut`           | `!`                                         |
-| `io`            | `write/1`, `nl/0`, `read/1`, `format/*`     |
-| `database`      | `assert/1`, `asserta`, `assertz`, `retract` |
-| `arith`         | `is/2`, `</2`, `>/2`, `=:=/2`               |
-| `unsupported`   | `findall/3`, `setof/3`, float literals      |
-| `syntax`        | a malformed clause (skipped; reader resyncs)|
+```prolog
+len([], 0).
+len([_|T], N) :- len(T, N0), N is N0 + 1.
+```
+
+**All-solutions** — `findall/3`, `bagof/3`, `setof/3` with `^` existential
+quantification and free-variable grouping; `copy_term/2`.
+
+**Term / list / atom builtins** — `functor/3`, `arg/3`, `=../2`, `atom_length/2`,
+`atom_codes/2`, `atom_chars/2`, `char_code/2`, `number_codes/2`, the type-test
+family (`var`, `nonvar`, `atom`, `number`, `integer`, `float`, `compound`,
+`is_list`, `ground`, …), and `sort/2` / `msort/2`. A bootstrap prelude adds the
+usual list library — `append/3`, `member/2`, `reverse/2`, `length/2`, `nth0/3`,
+`nth1/3`, `select/3`, `between/3`, … (`length`/`nth` are bidirectional).
+
+**Exceptions** — `throw/1` and `catch/3`; arithmetic and database errors are
+raised as standard ISO error balls (`instantiation_error`,
+`type_error(evaluable, N/A)`, `evaluation_error(zero_divisor)`,
+`permission_error(modify, static_procedure, N/A)`).
+
+**Database** — run-scoped `assert/1`, `asserta/1`, `assertz/1`, `retract/1` on
+predicates declared `:- dynamic name/arity`. Mutations live only for the query
+that makes them (never touch the base program) and are recorded for audit;
+mutating an undeclared predicate throws a `permission_error`.
+
+**Tabling & well-founded semantics** — `:- table name/arity` evaluates a
+predicate to its three-valued well-founded model (Van Gelder's alternating
+fixpoint). Left recursion terminates and reachability is complete; non-stratified
+negation gets a genuine *undefined* rather than a loop — the win/lose game is the
+canonical case:
+
+```prolog
+:- table win/1.
+move(a, b).  move(b, c).      % c is terminal
+win(X) :- move(X, Y), \+ win(Y).
+%  win(b) is true  (a win),
+%  win(a), win(c) are false (losses).
+%  A 2-cycle a<->b makes both undefined — a drawn game.
+```
+
+## What it still only diagnoses
+
+A few constructs are recognised by the reader and **reported, not executed** —
+the honest boundary:
+
+| Diagnostic kind | Examples                                     |
+|-----------------|----------------------------------------------|
+| `io`            | `write/1`, `nl/0`, `read/1`, `format/*` — I/O is a host capability, not in the engine |
+| `database`      | `retractall/1`, `abolish/1` (the bulk mutators; `assert`/`retract` run) |
+| `unsupported`   | `forall/2`, `aggregate_all/3`                |
+| `syntax`        | a malformed clause (skipped; reader resyncs) |
 
 ## The store boundary
 
@@ -98,15 +150,17 @@ canonical string and a `Diagnostic` records it.
 [`tln-mcp`](https://github.com/opentalon/tln-mcp) (a tool), and
 [`tln-asp`](https://github.com/opentalon/tln-asp) (a solver). Core stays a pure
 language + planner + SPIs; every edge is a plugin. Design recorded as
-[ADR 0009](https://github.com/opentalon/tln-language/blob/master/docs/design/0009-prolog-plugin.md).
+[ADR 0009](https://github.com/opentalon/tln-language/blob/master/docs/design/0009-prolog-plugin.md);
+the full-Prolog build-out is documented in
+[docs/design/0001-full-prolog-completion.md](docs/design/0001-full-prolog-completion.md).
 
-## Roadmap
+## Status
 
-To run *any* ported program, the engine grows the parts it currently only
-diagnoses — cut, arithmetic evaluation, `\+`, `findall/bagof/setof`,
-`assert/retract`, IO, and the standard term/list builtins — plus tabling for
-terminating left recursion. The transpiler and the porting command line live in
-their own repos.
+The full-Prolog roadmap (arithmetic, cut and control, `findall`/`bagof`/`setof`,
+the term/list/atom builtins, `throw`/`catch`, run-scoped `assert`/`retract`, and
+tabling with well-founded semantics) is **complete**. What remains is I/O (a host
+capability, deliberately out of the engine), the bulk database mutators, and the
+separate transpiler + porting CLI that live in their own repos.
 
 ## License
 
