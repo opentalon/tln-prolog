@@ -95,6 +95,7 @@ type Machine struct {
 	negFalse      map[string]bool // query: \+a holds iff key(a) ∈ negFalse
 	tabledClauses []Clause        // clauses whose head is a tabled predicate
 	wfsUniverse   map[string]Term // ground atoms seen while building the model
+	store         *bindStore      // the run's substitution + trail
 }
 
 type tabMode int
@@ -202,8 +203,11 @@ func (m *Machine) Solve(ctx context.Context, goals []Term, maxSolutions int) ([]
 	// run ends, so clause-database changes never outlive the query.
 	m.runClauses = append([]Clause{}, m.clauses...)
 	m.mutations = nil
+	root := NewBindings()
+	m.store = root.st
 	defer func() {
 		m.runClauses = nil
+		m.store = nil
 		m.tabMode, m.posOracle, m.negFalse = tabOff, nil, nil
 	}()
 
@@ -220,7 +224,7 @@ func (m *Machine) Solve(ctx context.Context, goals []Term, maxSolutions int) ([]
 		m.negFalse = model.falseKeys
 	}
 
-	_, _, err := m.solve(ctx, goals, Bindings{}, 0, func(s Bindings) bool {
+	_, _, err := m.solve(ctx, goals, root, 0, func(s Bindings) bool {
 		sol := make(Solution, len(qvars))
 		for _, v := range qvars {
 			sol[v] = Resolve(Var{v}, s)
@@ -302,7 +306,9 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 					return false, nil, nil
 				}
 			}
+			mark := s.st.mark()
 			ok, err := m.succeeds(ctx, g.Args[0], s, depth)
+			s.st.undoTo(mark) // negation binds nothing: discard the probe's bindings
 			if err != nil {
 				return false, nil, err
 			}
@@ -433,6 +439,7 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 	// fresh barrier scopes any '!' in the selected clause body to this call.
 	barrier := new(bool)
 	for _, c := range m.runClauses {
+		s.st.undoTo(s.mark) // reset the trail before trying this clause
 		rc := m.rename(c)
 		s2, ok := Unify(goal, rc.Head, s)
 		if !ok {
@@ -454,6 +461,7 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 			return false, commit, nil // a cut for an outer barrier: propagate
 		}
 	}
+	s.st.undoTo(s.mark) // leave the trail as the caller handed it to us
 	return false, nil, nil
 }
 
@@ -467,6 +475,7 @@ func (m *Machine) solveOr(ctx context.Context, left, right Term, rest []Term, s 
 	if err != nil || stop || commit != nil {
 		return stop, commit, err
 	}
+	s.st.undoTo(s.mark) // undo the left branch before trying the right
 	return m.solve(ctx, append([]Term{right}, rest...), s, depth+1, emit)
 }
 
@@ -521,6 +530,7 @@ func (m *Machine) solveCatch(ctx context.Context, goal, catcher, recovery Term, 
 	// Goal's own outcome.
 	if gErr != nil {
 		if pt, ok := gErr.(prologThrow); ok {
+			s.st.undoTo(s.mark) // restore bindings to the catch point
 			s2, ok := Unify(catcher, pt.ball, s)
 			if !ok {
 				return false, nil, gErr // catcher mismatch: rethrow

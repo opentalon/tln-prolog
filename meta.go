@@ -156,12 +156,15 @@ func peelCaret(g Term) (Term, map[string]bool) {
 	}
 }
 
-// collectAll runs goal to every solution, appending copyOut(pair) for each.
+// collectAll runs goal to every solution, appending copyOut(pair) for each. It
+// undoes any residual bindings so callers continue from a clean substitution.
 func (m *Machine) collectAll(ctx context.Context, goal Term, s Bindings, depth int, pair Term, sink func(Term)) error {
+	mark := s.st.mark()
 	_, _, err := m.solve(ctx, []Term{goal}, s, depth+1, func(b Bindings) bool {
 		sink(m.copyOut(pair, b))
 		return false // collect every solution
 	})
+	s.st.undoTo(mark)
 	return err
 }
 
@@ -246,6 +249,7 @@ func (m *Machine) solveBagof(ctx context.Context, tmpl, goal, listArg Term, rest
 
 	// Backtrack over groups: bind the free vars to each witness and the list.
 	for _, g := range groups {
+		s.st.undoTo(s.mark) // undo the previous group's witness bindings
 		s2, ok := Unify(witness, g.w, s)
 		if !ok {
 			continue

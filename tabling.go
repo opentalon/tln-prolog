@@ -116,8 +116,10 @@ func (m *Machine) tpStep(ctx context.Context, i map[string]Term, j map[string]bo
 	defer func() { m.tabMode, m.posOracle, m.negJ = prevMode, prevOracle, prevJ }()
 
 	for _, c := range m.tabledClauses {
+		mark := m.store.mark()
+		root := Bindings{st: m.store, mark: mark}
 		rc := m.rename(c)
-		_, _, err := m.solve(ctx, rc.Body, Bindings{}, 0, func(s Bindings) bool {
+		_, _, err := m.solve(ctx, rc.Body, root, 0, func(s Bindings) bool {
 			h := Resolve(rc.Head, s)
 			if isGround(h) {
 				k := h.String()
@@ -126,6 +128,7 @@ func (m *Machine) tpStep(ctx context.Context, i map[string]Term, j map[string]bo
 			}
 			return false // collect every derivation
 		})
+		m.store.undoTo(mark)
 		if err != nil {
 			return nil, err
 		}
@@ -138,6 +141,7 @@ func (m *Machine) tpStep(ctx context.Context, i map[string]Term, j map[string]bo
 // query time), in a deterministic order.
 func (m *Machine) answerTabled(ctx context.Context, goal Term, rest []Term, s Bindings, depth int, emit func(Bindings) bool) (bool, *bool, error) {
 	for _, a := range sortedAtoms(m.posOracle) {
+		s.st.undoTo(s.mark)
 		s2, ok := Unify(goal, a, s)
 		if !ok {
 			continue
@@ -153,6 +157,7 @@ func (m *Machine) answerTabled(ctx context.Context, goal Term, rest []Term, s Bi
 			return false, commit, nil
 		}
 	}
+	s.st.undoTo(s.mark)
 	return false, nil, nil
 }
 

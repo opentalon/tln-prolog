@@ -72,6 +72,7 @@ func (m *Machine) retract(clauseArg Term, s Bindings) (Bindings, bool, error) {
 		return s, false, permissionError("modify", "static_procedure", piTerm)
 	}
 	for i, c := range m.runClauses {
+		s.st.undoTo(s.mark)
 		rc := m.rename(c)
 		if s2, ok := Unify(pattern, clauseTerm(rc), s); ok {
 			// Remove clause i, building a new slice so in-progress loops are

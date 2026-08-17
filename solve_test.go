@@ -86,7 +86,7 @@ func TestListMembership(t *testing.T) {
 
 // TestOccursCheck confirms X = f(X) fails rather than building a cyclic term.
 func TestOccursCheck(t *testing.T) {
-	_, ok := Unify(Var{"X"}, Compound{Functor: "f", Args: []Term{Var{"X"}}}, Bindings{})
+	_, ok := Unify(Var{"X"}, Compound{Functor: "f", Args: []Term{Var{"X"}}}, NewBindings())
 	if ok {
 		t.Fatal("occurs-check failed: X = f(X) unified")
 	}
