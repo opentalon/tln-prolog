@@ -152,7 +152,21 @@ balls — `instantiation_error`, `type_error(evaluable, N/A)`,
 `evaluation_error(zero_divisor)`. `Ball(err)` lets hosts inspect an uncaught
 exception.
 
-### Phase 5b — `assert`/`retract`  *(Bucket 3 — include, but gated; confirm design)*
+### Phase 5b — `assert`/`retract`  *(shipped — run-scoped)*
+
+**Status: done.** `assert/1`, `asserta/1`, `assertz/1`, `retract/1` operate on a
+per-run copy of the clause DB (`m.runClauses`), initialised from the base program
+at each `Solve` and discarded when the run ends — mutations never outlive the
+query. Only predicates declared `:- dynamic name/arity` may be modified (prefix
+and functor directive forms, comma lists); mutating anything else throws
+`permission_error(modify, static_procedure, N/A)`. Each mutation creates a new
+slice so clause loops already in progress keep the logical (pre-mutation) view.
+Mutations are recorded for audit (`Machine.Mutations()`). `NewMachineFromProgram`
+carries the `:- dynamic` set through; the ToolResolver factory uses it. `retract`
+is semi-deterministic (first match). Reader stopped diagnosing assert/retract;
+`retractall`/`abolish` remain unimplemented (still diagnosed).
+
+<details><summary>Original design note (kept for context)</summary>
 
 This is the one item in genuine tension with the determinism/audit contract, so
 it ships behind guardrails rather than as raw ISO mutation:
@@ -166,6 +180,8 @@ it ships behind guardrails rather than as raw ISO mutation:
 
 Drop `DiagDatabase` only for declared dynamic predicates; keep it for undeclared
 ones.
+
+</details>
 
 ### Phase 6 — Tabling / well-founded semantics  *(strategic, hard)*
 
