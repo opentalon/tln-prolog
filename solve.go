@@ -39,6 +39,33 @@ func (c Clause) String() string {
 // classic left-recursion trap instead of hanging.
 var ErrDepthExceeded = errors.New("prolog: SLD resolution depth bound exceeded")
 
+// prologThrow carries a thrown ball up the error channel of solve. catch/3
+// intercepts it; if it reaches Solve uncaught it surfaces as the query error.
+type prologThrow struct{ ball Term }
+
+func (e prologThrow) Error() string { return "prolog: uncaught exception: " + e.ball.String() }
+
+// Ball returns the thrown term of an uncaught prolog exception, and ok=true, so
+// hosts can inspect it. Any other error returns ok=false.
+func Ball(err error) (Term, bool) {
+	if pt, ok := err.(prologThrow); ok {
+		return pt.ball, true
+	}
+	return nil, false
+}
+
+// The ISO error terms thrown by builtins: error(Formal, Context).
+func errorBall(formal Term) error {
+	return prologThrow{Compound{Functor: "error", Args: []Term{formal, Var{"_"}}}}
+}
+func instantiationError() error { return errorBall(Atom{"instantiation_error"}) }
+func typeError(kind string, culprit Term) error {
+	return errorBall(Compound{Functor: "type_error", Args: []Term{Atom{kind}, culprit}})
+}
+func evaluationError(what string) error {
+	return errorBall(Compound{Functor: "evaluation_error", Args: []Term{Atom{what}}})
+}
+
 // Machine is a pure-Go SLD-resolution engine over a set of clauses. It performs
 // depth-first resolution with chronological backtracking and an occurs-checking
 // unifier. A configurable depth bound guards against non-terminating left
@@ -186,6 +213,10 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 				return false, nil, nil
 			}
 			return m.solve(ctx, rest, b, depth+1, emit)
+		case g.Functor == "throw" && len(g.Args) == 1:
+			return false, nil, prologThrow{ball: m.copyOut(g.Args[0], s)}
+		case g.Functor == "catch" && len(g.Args) == 3:
+			return m.solveCatch(ctx, g.Args[0], g.Args[1], g.Args[2], rest, s, depth, emit)
 		case g.Functor == "=" && len(g.Args) == 2:
 			s2, ok := Unify(g.Args[0], g.Args[1], s)
 			if !ok {
@@ -339,6 +370,45 @@ func (m *Machine) det(ctx context.Context, rest []Term, s Bindings, depth int, e
 	return m.solve(ctx, rest, s2, depth+1, emit)
 }
 
+// solveCatch implements catch/3. It runs Goal, streaming each solution into the
+// continuation (rest); an exception thrown *within Goal* whose ball unifies with
+// Catcher runs Recovery instead. Exceptions from the continuation, and non-throw
+// errors (depth bound, cancellation), pass through uncaught.
+func (m *Machine) solveCatch(ctx context.Context, goal, catcher, recovery Term, rest []Term, s Bindings, depth int, emit func(Bindings) bool) (bool, *bool, error) {
+	var contStop bool
+	var contCommit *bool
+	var contErr error
+	contRan := false
+
+	// Solve Goal alone; for each of its solutions, run the continuation. The
+	// continuation's outcome is captured here so it is not subject to this catch.
+	gStop, gCommit, gErr := m.solve(ctx, []Term{goal}, s, depth+1, func(b Bindings) bool {
+		contRan = true
+		contStop, contCommit, contErr = m.solve(ctx, rest, b, depth+1, emit)
+		return contStop || contCommit != nil || contErr != nil
+	})
+
+	// A stop/commit/error from the continuation takes priority and escapes catch.
+	if contRan && (contErr != nil || contCommit != nil || contStop) {
+		return contStop, contCommit, contErr
+	}
+	// Goal's own outcome.
+	if gErr != nil {
+		if pt, ok := gErr.(prologThrow); ok {
+			s2, ok := Unify(catcher, pt.ball, s)
+			if !ok {
+				return false, nil, gErr // catcher mismatch: rethrow
+			}
+			return m.solve(ctx, append([]Term{recovery}, rest...), s2, depth+1, emit)
+		}
+		return false, nil, gErr // depth bound / cancellation: propagate
+	}
+	if gStop {
+		return true, nil, nil
+	}
+	return false, gCommit, nil
+}
+
 // succeeds reports whether goal has at least one solution under s.
 func (m *Machine) succeeds(ctx context.Context, goal Term, s Bindings, depth int) (bool, error) {
 	_, ok, err := m.firstSol(ctx, goal, s, depth)
@@ -461,9 +531,9 @@ func queryVars(goals []Term) []string {
 
 // evalArith evaluates an arithmetic expression term to a kernel [arith.Num],
 // reusing the ecosystem's shared numeric kernel so `is/2` matches tln core's
-// arithmetic exactly. Unbound variables and non-evaluable terms are errors —
-// ISO Prolog would throw; the engine surfaces them through the error channel
-// until throw/catch lands (Phase 5a).
+// arithmetic exactly. Failures are thrown as ISO error balls (instantiation_
+// error, type_error(evaluable, …), evaluation_error(zero_divisor)) so they are
+// catchable with catch/3.
 func evalArith(t Term, s Bindings) (arith.Num, error) {
 	t = Resolve(t, s)
 	switch x := t.(type) {
@@ -472,9 +542,9 @@ func evalArith(t Term, s Bindings) (arith.Num, error) {
 	case Float:
 		return arith.Float(x.Value), nil
 	case Var:
-		return arith.Num{}, fmt.Errorf("prolog: arithmetic on unbound variable %s", x.Name)
+		return arith.Num{}, instantiationError()
 	case Atom:
-		return arith.Num{}, fmt.Errorf("prolog: %s is not an evaluable constant", x.String())
+		return arith.Num{}, typeError("evaluable", indicatorTerm(x.Name, 0))
 	case Compound:
 		switch len(x.Args) {
 		case 1:
@@ -499,11 +569,23 @@ func evalArith(t Term, s Bindings) (arith.Num, error) {
 			if err != nil {
 				return arith.Num{}, err
 			}
-			return arith.Binary(x.Functor, a, b)
+			res, err := arith.Binary(x.Functor, a, b)
+			if err != nil {
+				if errors.Is(err, arith.ErrDivByZero) || errors.Is(err, arith.ErrModByZero) {
+					return arith.Num{}, evaluationError("zero_divisor")
+				}
+				return arith.Num{}, typeError("evaluable", indicatorTerm(x.Functor, 2))
+			}
+			return res, nil
 		}
-		return arith.Num{}, fmt.Errorf("prolog: %s is not an arithmetic function", Indicator(x))
+		return arith.Num{}, typeError("evaluable", indicatorTerm(x.Functor, len(x.Args)))
 	}
-	return arith.Num{}, fmt.Errorf("prolog: cannot evaluate %s", t.String())
+	return arith.Num{}, typeError("evaluable", t)
+}
+
+// indicatorTerm builds a Name/Arity predicate-indicator term for error balls.
+func indicatorTerm(name string, arity int) Term {
+	return Compound{Functor: "/", Args: []Term{Atom{name}, Int{int64(arity)}}}
 }
 
 // numTerm converts a kernel [arith.Num] back to a Prolog term, preserving the

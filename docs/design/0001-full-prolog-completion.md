@@ -141,12 +141,16 @@ prelude predicate shadows it. Reader gained the `=..` operator.
 
 </details>
 
-### Phase 5a — `throw/1` + `catch/3`
+### Phase 5a — `throw/1` + `catch/3`  *(shipped)*
 
-Propagate a `prologThrow{ball Term}` up the existing `error` return channel of
-`solve`; `catch/3` recovers it, unifies the ball with the catcher (restoring
-bindings to the catch point), and runs the recovery goal. Reuses plumbing that is
-already there.
+**Status: done.** `throw/1` sends a `prologThrow{ball}` up `solve`'s `error`
+channel (ball detached via `copyOut`). `catch/3` runs Goal streaming solutions to
+the continuation, and catches a throw *from Goal* whose ball unifies with the
+catcher (running Recovery); continuation throws and non-throw errors (depth
+bound, cancellation) pass through. Phase 1 arithmetic failures now throw ISO
+balls — `instantiation_error`, `type_error(evaluable, N/A)`,
+`evaluation_error(zero_divisor)`. `Ball(err)` lets hosts inspect an uncaught
+exception.
 
 ### Phase 5b — `assert`/`retract`  *(Bucket 3 — include, but gated; confirm design)*
 
