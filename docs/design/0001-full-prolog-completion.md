@@ -183,13 +183,32 @@ ones.
 
 </details>
 
-### Phase 6 — Tabling / well-founded semantics  *(strategic, hard)*
+### Phase 6 — Tabling / well-founded semantics  *(shipped)*
+
+**Status: done.** `:- table name/arity` marks a predicate for well-founded
+evaluation. `tabling.go` grounds the tabled clauses and computes the three-valued
+model with Van Gelder's **alternating fixpoint** (`phi` = Φ(J), `computeWFS` =
+lfp(Φ²) for true, Φ(true) for the upper bound; the rest is false/undefined over
+the discovered universe). The engine intercepts tabled goals: positive goals
+enumerate the model's true atoms (so left recursion terminates and reachability
+is complete), and `\+a` succeeds only when `a` is *false* — an undefined atom is
+neither true nor false, so the win/lose 2-cycle yields a draw. `Machine.WellFounded()`
+exposes the model. This is where tln-prolog's negation finally means the same
+thing as tln core's well-founded negation.
+
+Scope: grounding is naive and assumes a finite (range-restricted, Datalog-shaped)
+grounding; unbounded term-building hits `ErrTablingBudget`. The trail-store
+rewrite noted below remains a future optimisation, not required for correctness.
+
+<details><summary>Original design note (kept for context)</summary>
 
 Memoize subgoals, suspend/resume on recursive calls, and for negation implement
 the alternating-fixpoint / SCC simplification of delayed negative literals. This
 is the step that makes `\+` mean what tln core's negation means (well-founded),
 making tln-prolog semantically a tln citizen rather than merely ISO-ish. Expect
 the immutable-`Bindings` clone cost to force a trail-based store here.
+
+</details>
 
 ## Non-goals
 
