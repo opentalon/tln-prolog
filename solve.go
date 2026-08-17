@@ -57,9 +57,25 @@ type Option func(*Machine)
 // aborts the query with [ErrDepthExceeded].
 func WithMaxDepth(n int) Option { return func(m *Machine) { m.maxDepth = n } }
 
-// NewMachine builds a resolver over clauses.
+// NewMachine builds a resolver over clauses, with the bootstrap prelude
+// (append/3, member/2, …) prepended so those library predicates are available.
+// A user definition of a prelude predicate shadows the prelude one entirely, so
+// redefining e.g. member/2 does not double its solutions.
 func NewMachine(clauses []Clause, opts ...Option) *Machine {
-	m := &Machine{clauses: clauses, maxDepth: 4096}
+	userPreds := make(map[string]bool, len(clauses))
+	for _, c := range clauses {
+		userPreds[Indicator(c.Head)] = true
+	}
+	pre := prelude()
+	all := make([]Clause, 0, len(pre)+len(clauses))
+	for _, c := range pre {
+		if userPreds[Indicator(c.Head)] {
+			continue // user definition wins
+		}
+		all = append(all, c)
+	}
+	all = append(all, clauses...)
+	m := &Machine{clauses: all, maxDepth: 4096}
 	for _, o := range opts {
 		o(m)
 	}
@@ -228,6 +244,31 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 			return m.solveBagof(ctx, g.Args[0], g.Args[1], g.Args[2], rest, s, depth, emit, false)
 		case g.Functor == "setof" && len(g.Args) == 3:
 			return m.solveBagof(ctx, g.Args[0], g.Args[1], g.Args[2], rest, s, depth, emit, true)
+		case g.Functor == "functor" && len(g.Args) == 3:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return m.biFunctor(g.Args[0], g.Args[1], g.Args[2], s) })
+		case g.Functor == "arg" && len(g.Args) == 3:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return biArg(g.Args[0], g.Args[1], g.Args[2], s) })
+		case g.Functor == "=.." && len(g.Args) == 2:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return m.biUniv(g.Args[0], g.Args[1], s) })
+		case g.Functor == "atom_length" && len(g.Args) == 2:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return biAtomLength(g.Args[0], g.Args[1], s) })
+		case g.Functor == "atom_codes" && len(g.Args) == 2:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return m.biAtomText(g.Args[0], g.Args[1], s, false, false) })
+		case g.Functor == "atom_chars" && len(g.Args) == 2:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return m.biAtomText(g.Args[0], g.Args[1], s, true, false) })
+		case g.Functor == "number_codes" && len(g.Args) == 2:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return m.biAtomText(g.Args[0], g.Args[1], s, false, true) })
+		case g.Functor == "char_code" && len(g.Args) == 2:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return biCharCode(g.Args[0], g.Args[1], s) })
+		case g.Functor == "msort" && len(g.Args) == 2:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return biSort(g.Args[0], g.Args[1], s, false) })
+		case g.Functor == "sort" && len(g.Args) == 2:
+			return m.det(ctx, rest, s, depth, emit, func() (Bindings, bool) { return biSort(g.Args[0], g.Args[1], s, true) })
+		case isTypeTest(g.Functor) && len(g.Args) == 1:
+			if !typeTestHolds(g.Functor, g.Args[0], s) {
+				return false, nil, nil
+			}
+			return m.solve(ctx, rest, s, depth+1, emit)
 		}
 	}
 
@@ -286,6 +327,16 @@ func (m *Machine) solveITE(ctx context.Context, cond, then, elseGoal Term, rest 
 		return false, nil, nil
 	}
 	return m.solve(ctx, append([]Term{elseGoal}, rest...), s, depth+1, emit)
+}
+
+// det runs a deterministic builtin: f produces the extended bindings (or ok=
+// false to fail), then resolution continues with the rest of the goals.
+func (m *Machine) det(ctx context.Context, rest []Term, s Bindings, depth int, emit func(Bindings) bool, f func() (Bindings, bool)) (bool, *bool, error) {
+	s2, ok := f()
+	if !ok {
+		return false, nil, nil
+	}
+	return m.solve(ctx, rest, s2, depth+1, emit)
 }
 
 // succeeds reports whether goal has at least one solution under s.
