@@ -46,6 +46,9 @@ func (d Diagnostic) String() string {
 type Program struct {
 	Clauses     []Clause
 	Diagnostics []Diagnostic
+	// Dynamic holds the predicate indicators ("name/arity") declared via
+	// `:- dynamic ...` directives; only these may be asserted/retracted.
+	Dynamic []string
 }
 
 // Parse reads Prolog source into a [Program]. It never returns an error: syntax
@@ -59,10 +62,14 @@ func Parse(src string) *Program {
 	prog := &Program{}
 	p := &parser{lex: newLexer(src)}
 	for {
-		clause, ok, diags := p.clause()
+		clause, directive, ok, diags := p.clause()
 		prog.Diagnostics = append(prog.Diagnostics, diags...)
 		if !ok {
 			break
+		}
+		if directive != nil {
+			prog.Dynamic = append(prog.Dynamic, dynamicIndicators(directive)...)
+			continue
 		}
 		if clause != nil {
 			prog.Clauses = append(prog.Clauses, *clause)
@@ -234,6 +241,30 @@ var infixOps = map[string]opInfo{
 	"^": {200, true},
 }
 
+// prefixOps are the prefix operators, mapping to the max precedence of their
+// operand: negation-as-failure, directive/query markers, and `dynamic`.
+var prefixOps = map[string]int{
+	"\\+":     900,
+	":-":      1200,
+	"?-":      1200,
+	"dynamic": 1150,
+}
+
+// startsTerm reports whether tok can begin a term (used to decide if a bare
+// atom like `dynamic` is acting as a prefix operator rather than a constant).
+func startsTerm(tok token) bool {
+	switch tok.kind {
+	case tInt, tFloat, tVar, tAtom:
+		return true
+	case tPunct:
+		return tok.text == "(" || tok.text == "["
+	case tOp:
+		_, ok := prefixOps[tok.text]
+		return ok || tok.text == "-"
+	}
+	return false
+}
+
 type parser struct {
 	lex  *lexer
 	peek *token
@@ -265,27 +296,52 @@ func (p *parser) peekTok() token {
 // clause reads one clause terminated by ".". ok=false signals EOF. On a syntax
 // error it returns a nil clause plus a diagnostic and resynchronises past the
 // next ".".
-func (p *parser) clause() (*Clause, bool, []Diagnostic) {
+func (p *parser) clause() (*Clause, Term, bool, []Diagnostic) {
 	if p.peekTok().kind == tEOF {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 	t, diags, err := p.term(1200)
 	if err != nil {
 		diags = append(diags, Diagnostic{DiagSyntax, err.Error(), p.peekTok().line})
 		p.resync()
-		return nil, true, diags
+		return nil, nil, true, diags
 	}
 	// consume terminating "."
 	end := p.advance()
 	if !(end.kind == tPunct && end.text == ".") {
 		diags = append(diags, Diagnostic{DiagSyntax, "expected '.' at end of clause", end.line})
 		p.resync()
-		return nil, true, diags
+		return nil, nil, true, diags
+	}
+
+	// A directive `:- Goal.` parses as the prefix ":-"/1 term.
+	if c, ok := t.(Compound); ok && c.Functor == ":-" && len(c.Args) == 1 {
+		return nil, c.Args[0], true, diags
 	}
 
 	head, body := splitClause(t)
 	diags = append(diags, scanDiagnostics(body, end.line)...)
-	return &Clause{Head: head, Body: body}, true, diags
+	return &Clause{Head: head, Body: body}, nil, true, diags
+}
+
+// dynamicIndicators extracts the "name/arity" strings from a `dynamic ...`
+// directive body: `dynamic(foo/2)`, `dynamic foo/2`, or a comma list thereof.
+func dynamicIndicators(directive Term) []string {
+	c, ok := directive.(Compound)
+	if !ok || c.Functor != "dynamic" || len(c.Args) != 1 {
+		return nil
+	}
+	var out []string
+	for _, spec := range flattenConj(c.Args[0]) {
+		if pi, ok := spec.(Compound); ok && pi.Functor == "/" && len(pi.Args) == 2 {
+			name, ok1 := pi.Args[0].(Atom)
+			ar, ok2 := pi.Args[1].(Int)
+			if ok1 && ok2 {
+				out = append(out, fmt.Sprintf("%s/%d", name.Name, ar.Value))
+			}
+		}
+	}
+	return out
 }
 
 func (p *parser) resync() {
@@ -363,13 +419,13 @@ func (p *parser) primary() (Term, []Diagnostic, error) {
 				return Float{-f}, nil, nil
 			}
 		}
-		// prefix negation-as-failure: \+ Goal (fy, precedence 900).
-		if tok.text == "\\+" {
-			arg, d, err := p.term(900)
+		// prefix operators: \+ Goal, :- Directive, ?- Query.
+		if prec, ok := prefixOps[tok.text]; ok {
+			arg, d, err := p.term(prec)
 			if err != nil {
 				return nil, d, err
 			}
-			return Compound{Functor: "\\+", Args: []Term{arg}}, d, nil
+			return Compound{Functor: tok.text, Args: []Term{arg}}, d, nil
 		}
 		return nil, nil, fmt.Errorf("unexpected operator %q", tok.text)
 	case tAtom:
@@ -381,6 +437,14 @@ func (p *parser) primary() (Term, []Diagnostic, error) {
 				return nil, diags, err
 			}
 			return Compound{Functor: tok.text, Args: args}, diags, nil
+		}
+		// prefix atom operators (e.g. `dynamic foo/2`) when a term follows.
+		if prec, ok := prefixOps[tok.text]; ok && startsTerm(p.peekTok()) {
+			arg, d, err := p.term(prec)
+			if err != nil {
+				return nil, d, err
+			}
+			return Compound{Functor: tok.text, Args: []Term{arg}}, d, nil
 		}
 		return Atom{tok.text}, nil, nil
 	case tPunct:
@@ -505,7 +569,7 @@ func scanDiagnostics(body []Term, line int) []Diagnostic {
 			switch Indicator(x) {
 			case "write/1", "writeln/1", "print/1", "read/1", "format/1", "format/2", "format/3":
 				out = append(out, Diagnostic{DiagIO, Indicator(x) + " (IO) is not executed", line})
-			case "assert/1", "asserta/1", "assertz/1", "retract/1", "retractall/1", "abolish/1":
+			case "retractall/1", "abolish/1":
 				out = append(out, Diagnostic{DiagDatabase, Indicator(x) + " (database mutation) is not executed", line})
 			case "forall/2", "aggregate_all/3":
 				out = append(out, Diagnostic{DiagUnsupported, Indicator(x) + " is not supported", line})

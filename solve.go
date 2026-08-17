@@ -75,6 +75,20 @@ type Machine struct {
 	clauses  []Clause
 	maxDepth int
 	renameCt int
+
+	dynamic map[string]bool // predicates assert/retract may modify
+
+	// Per-run mutable state. runClauses is a copy-on-write view of clauses used
+	// only during a Solve; assert/retract mutate it and it is discarded when the
+	// run ends, so mutations are run-scoped (never touch the base program).
+	runClauses []Clause
+	mutations  []Mutation
+}
+
+// Mutation records one assert/retract for the audit trail.
+type Mutation struct {
+	Op     string // "asserta", "assertz", or "retract"
+	Clause string // the clause in canonical form
 }
 
 // Option configures a [Machine].
@@ -83,6 +97,26 @@ type Option func(*Machine)
 // WithMaxDepth sets the SLD resolution depth bound (default 4096). Reaching it
 // aborts the query with [ErrDepthExceeded].
 func WithMaxDepth(n int) Option { return func(m *Machine) { m.maxDepth = n } }
+
+// WithDynamic marks predicate indicators ("name/arity") as dynamic, so
+// assert/retract may modify them; mutating any other predicate throws a
+// permission_error.
+func WithDynamic(indicators ...string) Option {
+	return func(m *Machine) {
+		if m.dynamic == nil {
+			m.dynamic = map[string]bool{}
+		}
+		for _, pi := range indicators {
+			m.dynamic[pi] = true
+		}
+	}
+}
+
+// NewMachineFromProgram builds a machine from a parsed program, carrying its
+// `:- dynamic` declarations through so assert/retract are permitted on them.
+func NewMachineFromProgram(p *Program, opts ...Option) *Machine {
+	return NewMachine(p.Clauses, append([]Option{WithDynamic(p.Dynamic...)}, opts...)...)
+}
 
 // NewMachine builds a resolver over clauses, with the bootstrap prelude
 // (append/3, member/2, …) prepended so those library predicates are available.
@@ -109,8 +143,14 @@ func NewMachine(clauses []Clause, opts ...Option) *Machine {
 	return m
 }
 
-// Clauses returns the machine's clause database.
+// Clauses returns the machine's base clause database (excluding any run-scoped
+// assert/retract, which are discarded when a query ends).
 func (m *Machine) Clauses() []Clause { return m.clauses }
+
+// Mutations returns the assert/retract operations performed during the most
+// recent Solve, for auditing. The clause changes themselves are run-scoped and
+// no longer in effect.
+func (m *Machine) Mutations() []Mutation { return m.mutations }
 
 // Solution is a resolved answer: the query variables bound to ground (or
 // partially instantiated) terms.
@@ -123,6 +163,12 @@ func (m *Machine) Solve(ctx context.Context, goals []Term, maxSolutions int) ([]
 	qvars := queryVars(goals)
 	var out []Solution
 	m.renameCt = 0
+
+	// Start a run: assert/retract work against a copy that is discarded when the
+	// run ends, so clause-database changes never outlive the query.
+	m.runClauses = append([]Clause{}, m.clauses...)
+	m.mutations = nil
+	defer func() { m.runClauses = nil }()
 
 	_, _, err := m.solve(ctx, goals, Bindings{}, 0, func(s Bindings) bool {
 		sol := make(Solution, len(qvars))
@@ -217,6 +263,20 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 			return false, nil, prologThrow{ball: m.copyOut(g.Args[0], s)}
 		case g.Functor == "catch" && len(g.Args) == 3:
 			return m.solveCatch(ctx, g.Args[0], g.Args[1], g.Args[2], rest, s, depth, emit)
+		case (g.Functor == "assert" || g.Functor == "assertz" || g.Functor == "asserta") && len(g.Args) == 1:
+			if err := m.assert(g.Args[0], s, g.Functor == "asserta"); err != nil {
+				return false, nil, err
+			}
+			return m.solve(ctx, rest, s, depth+1, emit)
+		case g.Functor == "retract" && len(g.Args) == 1:
+			s2, ok, err := m.retract(g.Args[0], s)
+			if err != nil {
+				return false, nil, err
+			}
+			if !ok {
+				return false, nil, nil
+			}
+			return m.solve(ctx, rest, s2, depth+1, emit)
 		case g.Functor == "=" && len(g.Args) == 2:
 			s2, ok := Unify(g.Args[0], g.Args[1], s)
 			if !ok {
@@ -306,7 +366,7 @@ func (m *Machine) solve(ctx context.Context, goals []Term, s Bindings, depth int
 	// User clauses: try each, renamed fresh so its variables never clash. A
 	// fresh barrier scopes any '!' in the selected clause body to this call.
 	barrier := new(bool)
-	for _, c := range m.clauses {
+	for _, c := range m.runClauses {
 		rc := m.rename(c)
 		s2, ok := Unify(goal, rc.Head, s)
 		if !ok {

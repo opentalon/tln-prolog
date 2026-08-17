@@ -41,7 +41,7 @@ func (resolver) Call(ctx context.Context, server, tool string, args map[string]a
 	if err != nil {
 		return nil, fmt.Errorf("tln-prolog: parse goal %q: %w", goalSrc, err)
 	}
-	m := NewMachine(Parse(programSrc).Clauses)
+	m := NewMachineFromProgram(Parse(programSrc))
 	sols, err := m.Solve(ctx, []Term{goal}, 0)
 	if err != nil {
 		return nil, err

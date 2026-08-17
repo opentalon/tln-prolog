@@ -37,7 +37,7 @@ func TestParseListSyntax(t *testing.T) {
 
 func TestDiagnosticsForUnsupported(t *testing.T) {
 	prog := Parse(`
-		go :- write(hello), nl, X is 1 + 2, assert(seen), !.
+		go :- write(hello), nl, X is 1 + 2, retractall(seen), !.
 	`)
 	kinds := map[DiagnosticKind]int{}
 	for _, d := range prog.Diagnostics {
@@ -48,7 +48,8 @@ func TestDiagnosticsForUnsupported(t *testing.T) {
 			t.Errorf("expected a %s diagnostic; got %v", want, prog.Diagnostics)
 		}
 	}
-	// Arithmetic and cut are now executed, so they must NOT be diagnosed.
+	// Arithmetic, cut and assert/retract are executed now — not diagnosed.
+	// (retractall/1 above is still unimplemented, so it keeps a DiagDatabase.)
 	if kinds[DiagArith] != 0 {
 		t.Errorf("arithmetic is evaluated now; unexpected arith diagnostic: %v", prog.Diagnostics)
 	}
