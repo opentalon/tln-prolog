@@ -60,7 +60,20 @@ The exception is **cut** (Phase 2), which needs an engine change, not a builtin.
   errors.
 - Drop `DiagArith`.
 
-### Phase 2 — Cut  *(the architecturally significant step — spec before coding)*
+### Phase 2 — Cut  *(shipped — approach (a), the barrier-marker)*
+
+**Status: done.** `solve` now returns `(stop, commit *bool, err)`. Each clause
+activation allocates a fresh `barrier := new(bool)`; `bindCut` rewrites `!` in the
+selected body (recursing through the cut-transparent `,`/`;`/`->` constructs) to a
+`cutMarker{barrier}`. When the cut's continuation is exhausted it returns
+`barrier` as `commit`; every clause loop it unwinds through breaks without trying
+alternatives, until the loop that owns that barrier consumes it — pruning both the
+predicate's remaining clauses *and* the choice points of body goals before the
+cut. Derived on top: `\+/1`, `not/1`, `once/1`, `(->)/2`, and `(->;)/3`
+if-then-else, with `firstSol` as the cut-opaque boundary. `DiagCut` dropped; the
+reader gained prefix `\+`.
+
+<details><summary>Original design note (kept for context)</summary>
 
 Cut cannot be "just another builtin", because the flat `body ++ rest` list has
 already erased the boundary cut needs as its barrier. Two options:
@@ -83,6 +96,8 @@ just the outer one. Specify the exact plumbing before writing code.
 
 Once cut exists, derive the rest as library/sugar: `(->)/2`, `(;)/2`, `\+/1`,
 `once/1`, `not/1`. Drop `DiagCut`.
+
+</details>
 
 ### Phase 3 — `findall/3` → `bagof/3` / `setof/3`
 
